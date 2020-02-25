@@ -1,5 +1,6 @@
 import torch 
 import torch.nn as nn
+import torch.utils.data as Data
 import numpy as np 
 from dataset import VideoSAR
 from model import Model
@@ -16,12 +17,12 @@ def weights_init(model):
     classname = model.__class__.__name__
     if classname.find('Conv3d') != -1: # 这里的Conv和BatchNnorm是torc.nn里的形式
         n = model.kernel_size[0] * model.kernel_size[1] * model.kernel_size[2] * model.out_channels
-        model.weight.data.normal_(0, math.sqrt(2. / n))
+        model.weight.data.normal_(0, np.sqrt(2. / n))
         if model.bias is not None:
             model.bias.data.zero_()
     elif classname.find('Conv2d') != -1: 
         n = model.kernel_size[0] * model.kernel_size[1] * model.out_channels
-        model.weight.data.normal_(0, math.sqrt(2. / n))
+        model.weight.data.normal_(0, np.sqrt(2. / n))
         if model.bias is not None:
             model.bias.data.zero_()
     elif classname.find('BatchNorm') != -1:
@@ -65,7 +66,7 @@ def train(batch_size=32, train_epoch=20):
     :param train_epoch: training epoch size
     """
     print('Train.')
-    print('batch size:' batch_size)
+    print('batch size:', batch_size)
     print('train epoch:', train_epoch)
     dataset = VideoSAR()
     dataset_size = len(dataset)
@@ -84,7 +85,7 @@ def train(batch_size=32, train_epoch=20):
     # 一共训练20个epoch, 前10个epoch学习率为1e-3, 后10个epoch学习率为1e-4
     learning_rate = 1e-3
     # class torch.optim.SGD(params, lr=, momentum=0, dampening=0, weight_decay=0, nesterov=False)
-    optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=1e-4)
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=1e-4)
     
     loss_save = []
     for epoch in range(train_epoch):
