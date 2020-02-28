@@ -6,12 +6,11 @@ import numpy as np
 Config of 3D ResNet
 '''
 input_size = (64, 64) # (height, width)
-hid_dim_layer1 = [32, 32, 64] # layer1中各输出隐藏层
+hid_dim_layer1 = [64, 64, 64] # layer1中各输出隐藏层
 hid_dim_layer2 = [64, 64, 64] # layer2中各输出隐藏层
 hid_dim_layer3 = [64, 64, 64] # layer3中各输出隐藏层
 hid_dim_layer4 = [64, 64, 64] # layer4中各输出隐藏层
-hid_dim_layer5 = [64, 64, 64] # layer5中各输出隐藏层
-frame_num = 9 # 样本帧数
+frame_num = 5 # 样本帧数
 '''=============================================================='''
 
 
@@ -23,8 +22,10 @@ class Res3DBlock(nn.Module):
         super(Res3DBlock, self).__init__() 
         self.bn1 = nn.BatchNorm3d(channel)
         self.conv1 = nn.Conv3d(channel, channel, kernel_size=(3, 3, 3), padding=(2, 2, 2), dilation=2)
+        # self.conv1 = nn.Conv3d(channel, channel, kernel_size=(3, 3, 3), padding=(1, 1, 1))
         self.bn2 = nn.BatchNorm3d(channel) 
         self.conv2 = nn.Conv3d(channel, channel, kernel_size=(3, 3, 3), padding=(2, 2, 2), dilation=2)
+        # self.conv2 = nn.Conv3d(channel, channel, kernel_size=(3, 3, 3), padding=(1, 1, 1))
 
         self.relu = nn.ReLU() 
 
@@ -36,6 +37,7 @@ class Res3DBlock(nn.Module):
         h = self.relu(h)
         h = self.conv2(h)
         output = h + x 
+        # output = h
         return output
 
 
@@ -73,20 +75,11 @@ class CNN3D(nn.Module):
             Res3DBlock(channels[1]), 
             nn.BatchNorm3d(channels[1]), 
             nn.ReLU(),
-            nn.Conv3d(channels[1], channels[2], kernel_size=(3, 3, 3), stride=(2, 2, 2), padding=(1, 1, 1)), 
+            nn.Conv3d(channels[1], channels[2], kernel_size=(3, 3, 3), stride=(2, 2, 2), padding=(0, 1, 1)), 
         )
 
         channels = hid_dim_layer4
         self.layer4 = nn.Sequential(
-            Res3DBlock(channels[0]), 
-            Res3DBlock(channels[1]), 
-            nn.BatchNorm3d(channels[1]), 
-            nn.ReLU(),
-            nn.Conv3d(channels[1], channels[2], kernel_size=(3, 3, 3), stride=(2, 2, 2), padding=(0, 1, 1)), 
-        )
-
-        channels = hid_dim_layer5
-        self.layer5 = nn.Sequential(
             nn.BatchNorm2d(channels[0]),
             nn.ReLU(inplace=True), 
             nn.Conv2d(channels[0], channels[1], kernel_size=3, padding=1),
@@ -106,20 +99,18 @@ class CNN3D(nn.Module):
         :return h2: 隐藏层layer3输出
         :return output: 输出层输出
         '''
-        h = self.layer1(x)
+        h1 = self.layer1(x)
         # print('layer1 output: ', h.size())
-        h1 = self.layer2(h)
+        h2 = self.layer2(h1)
         # print('layer2 output: ', h1.size())
-        h2 = self.layer3(h1)
+        h3 = self.layer3(h2)
         # print('layer3 output: ', h2.size())
-        h3 = self.layer4(h2)
-        # print('layer4 output: ', h3.size())
 
         # 将输出[2, 64, 1, 3, 3]转换为[2, 64, 3, 3]
         output = torch.squeeze(h3, 2)
-        output = self.layer5(output)
+        output = self.layer4(output)
 
-        return h, h1, h2, output
+        return h1, h2, output
 
 
 if __name__ == '__main__':
@@ -139,14 +130,15 @@ if __name__ == '__main__':
     fake_data = torch.from_numpy(fake_data)
 
     print(fake_data.size())
-    h, h1, h2, output = cnn3d(fake_data)
+    h1, h2, output = cnn3d(fake_data)
     print(output.size())
 
 '''
 运行结果: 
-torch.Size([2, 1, 9, 64, 64])
-layer1 output:  torch.Size([2, 64, 9, 32, 32])
-layer2 output:  torch.Size([2, 64, 5, 16, 16])
-layer3 output:  torch.Size([2, 64, 3, 8, 8])
-layer4 output:  torch.Size([2, 64, 1, 4, 4])
+torch.Size([2, 1, 5, 64, 64])
+layer1 output:  torch.Size([2, 64, 5, 32, 32])
+layer2 output:  torch.Size([2, 64, 3, 16, 16])
+layer3 output:  torch.Size([2, 64, 1, 8, 8])
+torch.Size([2, 64, 8, 8])
+
 '''

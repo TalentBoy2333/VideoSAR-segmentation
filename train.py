@@ -4,8 +4,10 @@ import torch.utils.data as Data
 import numpy as np 
 from dataset import VideoSAR
 from model import Model
+import os 
 
 cuda = True if torch.cuda.is_available() else False
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 
 def weights_init(model):
     """
@@ -59,13 +61,14 @@ class SoftDiceLoss(nn.Module):
         dice_loss = 1 - score.sum() / num
         return dice_loss
 
-def train(batch_size=32, train_epoch=20):
+def train(batch_size=4, train_epoch=20):
     """
     训练
     :param batch_size: batch size.
     :param train_epoch: training epoch size
     """
     print('Train.')
+    print('Use GPU:', cuda)
     print('batch size:', batch_size)
     print('train epoch:', train_epoch)
     dataset = VideoSAR()
@@ -73,12 +76,14 @@ def train(batch_size=32, train_epoch=20):
     print('frames number:', dataset_size)
     epoch_size = dataset_size // batch_size
     print('iteration number in an epoch:', epoch_size)
+    print('Loading Dataset..')
     data_loader = Data.DataLoader(dataset, batch_size, num_workers=8, shuffle=True, pin_memory=True)
-    batch_iterator = iter(data_loader)
 
-    model = Model()
+    print('Building Model..')
+    model = Model(is_add_lstm=True, is_add_opticalFlow=False)
     loss_func = SoftDiceLoss()
     if cuda:
+        model = torch.nn.DataParallel(model) # GPU并行训练
         model = model.cuda()
         loss_func = loss_func.cuda()
     model.apply(weights_init)
@@ -87,16 +92,18 @@ def train(batch_size=32, train_epoch=20):
     # class torch.optim.SGD(params, lr=, momentum=0, dampening=0, weight_decay=0, nesterov=False)
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=1e-4)
     
+    print('Training..')
     loss_save = []
     for epoch in range(train_epoch):
         # 一共训练20个epoch, 前10个epoch学习率为1e-3, 后10个epoch学习率为1e-4
-        if train_epoch == 10:
+        if epoch == 10:
             learning_rate = 1e-4
             for p in optimizer.param_groups:
                 p['lr'] = learning_rate
             
         
-        for iteration in range(1, epoch_size+2):
+        batch_iterator = iter(data_loader)
+        for iteration in range(1, epoch_size+1):
             frames, seg = batch_iterator.next()
             if cuda:
                 frames = frames.cuda() 
@@ -117,9 +124,6 @@ def train(batch_size=32, train_epoch=20):
                 ' | ', 'lr:', learning_rate, 
                 ' | ', 
             )
-            print('iter', iteration)
-            print('images:', frames.size())
-            print('labels:', seg.size())
         print('Saving parameters in model on epoch', epoch+1)
         torch.save(model.state_dict(), './param/model_epoch'+str(epoch+1).zfill(2)+'.pkl')    
     print('Saving losses during training.')
@@ -127,6 +131,8 @@ def train(batch_size=32, train_epoch=20):
         
 if __name__ == '__main__':
     train()
+    # with torch.cuda.device(1):
+    #     train()
         
 
     

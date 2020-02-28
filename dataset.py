@@ -8,7 +8,7 @@ import numpy as np
 Config of dataset
 '''
 frame_num = 900 # 视频帧数量
-image_num_in_frame = 9 # 一个样本包含的视频帧数量
+image_num_in_frame = 5 # 一个样本包含的视频帧数量
 frame_h = 720 # 视频帧行数
 frame_w = 660 # 视频帧列数
 '''=============================================================='''

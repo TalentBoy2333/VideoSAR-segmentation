@@ -1,13 +1,18 @@
 import torch 
 import torch.nn as nn
+import torch.utils.data as Data
 import numpy as np 
+import cv2
 from dataset import VideoSAR
 from model import Model
+import os 
+
+cuda = True if torch.cuda.is_available() else False
 
 '''
 Config of Eval
 '''
-image_num_in_frame = 9 # 一个样本包含的视频帧数量
+image_num_in_frame = 5 # 一个样本包含的视频帧数量
 image_size = 512 # 裁取视频帧中的一个区域作为训练样本
 frame_h = 720 # 视频帧行数
 frame_w = 660 # 视频帧列数
@@ -65,7 +70,7 @@ class CalIOU(nn.Module):
         preds[preds>=th] = 1. # 概率大于等于threshold的像素点预测为前景, 1
         preds[preds<th] = 0. # 概率小于threshold的像素点预测为背景, 0
 
-        m1 = probs.view(num, -1)
+        m1 = preds.view(num, -1)
         m2 = targets.view(num, -1)
         intersection = (m1 * m2)
 
@@ -86,17 +91,18 @@ def eval(param_path='./param/model_epoch20.pkl', threshold=0.5):
     dataset = VideoSAR(crop_random=False)
     dataset_size = len(dataset)
     print('frames number:', dataset_size)
-    data_loader = Data.DataLoader(dataset, 1, num_workers=8, pin_memory=True)
+    data_loader = Data.DataLoader(dataset, 1, num_workers=0, pin_memory=False)
     batch_iterator = iter(data_loader)
 
-    model = Model()
+    model = Model(is_add_lstm=True, is_add_opticalFlow=False)
     model.eval()
     cal_score = CalScore() 
-    cal_iou = CalIOU()
+    cal_iou = CalIOU(threshold)
     if cuda:
+        model = torch.nn.DataParallel(model) 
         model = model.cuda()
         cal_score = cal_score.cuda() 
-        cal_iou = cal_iou.cuda(threshold) 
+        cal_iou = cal_iou.cuda() 
     print('Loading parameters of model.')
     model.load_state_dict(torch.load(param_path))
 
@@ -115,16 +121,19 @@ def eval(param_path='./param/model_epoch20.pkl', threshold=0.5):
         iou = iou.cpu().data.numpy() 
         ious.append(iou)
         scores.append(score) 
+        print(i, ' iou:', iou, '  scores:', score )
     print('final iou:', np.mean(ious))
     print('final score:', np.mean(scores))
 
     print('Saving evaluation result.')
     ious_name = 'iou_' + param_path[-11:-4] + '_th' + str(threshold) + '.npy'
+    ious_name = os.path.join('./picture/', ious_name)
     score_name = 'score_' + param_path[-11:-4] + '.npy'
+    score_name = os.path.join('./picture/', score_name)
     np.save(ious_name, ious)
     np.save(score_name, scores)
 
-def mask_one(index, threshold=0.5, frames_path='./dataset/frames/', segs_path='./dataset/segmentation/'):
+def mask_one(index, threshold=0.5, param_path='./param/model_epoch20.pkl', frames_path='./dataset/frames/', segs_path='./dataset/segmentation/'):
     """
     预测一个连续视频帧的语义分割结果
     :param index: 连续视频帧ind
@@ -136,14 +145,15 @@ def mask_one(index, threshold=0.5, frames_path='./dataset/frames/', segs_path='.
         print('index Error.')
         return 
     
-    model = Model()
+    model = Model(is_add_lstm=True, is_add_opticalFlow=False)
     model.eval()
     cal_score = CalScore() 
-    cal_iou = CalIOU()
+    cal_iou = CalIOU(threshold)
     if cuda:
+        model = torch.nn.DataParallel(model) 
         model = model.cuda()
         cal_score = cal_score.cuda() 
-        cal_iou = cal_iou.cuda(threshold) 
+        cal_iou = cal_iou.cuda() 
     print('Loading parameters of model.')
     model.load_state_dict(torch.load(param_path))
 
@@ -170,10 +180,13 @@ def mask_one(index, threshold=0.5, frames_path='./dataset/frames/', segs_path='.
         image = torch.Tensor(image) # [h,w]
         image = torch.unsqueeze(image, 0) # 扩展到channel维度[c,h,w]
         image = torch.unsqueeze(image, 0) # 扩展到frame维度[f,c,h,w]
+        image = torch.unsqueeze(image, 0) # 扩展到batch维度[n,f,c,h,w]
         if frames is None:
             frames = image
         else:
-            frames = torch.cat((frames, image), 0)
+            frames = torch.cat((frames, image), 1)
+    if cuda:
+        frames = frames.cuda()
     # load segmentation 
     seg_ind = index + image_num_in_frame - 1
     seg_name = str(seg_ind) + '.png'
@@ -182,7 +195,11 @@ def mask_one(index, threshold=0.5, frames_path='./dataset/frames/', segs_path='.
     label_num = np.amax(seg) # 语义标注中前景的标注数字
     seg = seg[0:image_size, 0:image_size] / label_num # 得到前景为1, 背景为0的GroundTruth
     seg = torch.Tensor(seg) # [h,w]
+    seg = torch.unsqueeze(seg, 0) # 扩展到batch维度[n,h,w]
+    if cuda:
+        seg = seg.cuda()
     # predict and evaluation
+    print(frames.size())
     logits = model(frames)
     score = cal_score(logits, seg)
     iou, preds = cal_iou(logits, seg)
@@ -196,28 +213,36 @@ def mask_one(index, threshold=0.5, frames_path='./dataset/frames/', segs_path='.
     右上
     '''
     # load frames 
+    torch.cuda.empty_cache()
     frames = None
+    seg = None
     for i in range(image_num_in_frame):
         frame_ind = index + i
         frame_name = str(frame_ind) + '.png'
         frame_path = os.path.join(frames_path, frame_name)
         frame = cv2.imread(frame_path, 0)
-        image = frame[0:image_size, frame_w-image_size+1:frame_w+1]
+        image = frame[0:image_size, frame_w-image_size:frame_w]
         image = torch.Tensor(image) # [h,w]
         image = torch.unsqueeze(image, 0) # 扩展到channel维度[c,h,w]
         image = torch.unsqueeze(image, 0) # 扩展到frame维度[f,c,h,w]
+        image = torch.unsqueeze(image, 0) # 扩展到batch维度[n,f,c,h,w]
         if frames is None:
             frames = image
         else:
-            frames = torch.cat((frames, image), 0)
+            frames = torch.cat((frames, image), 1)
+    if cuda:
+        frames = frames.cuda()
     # load segmentation 
     seg_ind = index + image_num_in_frame - 1
     seg_name = str(seg_ind) + '.png'
     seg_path = os.path.join(segs_path, seg_name)
     seg = cv2.imread(seg_path, 0)
     label_num = np.amax(seg) # 语义标注中前景的标注数字
-    seg = seg[0:image_size, frame_w-image_size+1:frame_w+1] / label_num # 得到前景为1, 背景为0的GroundTruth
+    seg = seg[0:image_size, frame_w-image_size:frame_w] / label_num # 得到前景为1, 背景为0的GroundTruth
     seg = torch.Tensor(seg) # [h,w]
+    seg = torch.unsqueeze(seg, 0) # 扩展到batch维度[n,h,w]
+    if cuda:
+        seg = seg.cuda()
     # predict and evaluation
     logits = model(frames)
     score = cal_score(logits, seg)
@@ -238,22 +263,28 @@ def mask_one(index, threshold=0.5, frames_path='./dataset/frames/', segs_path='.
         frame_name = str(frame_ind) + '.png'
         frame_path = os.path.join(frames_path, frame_name)
         frame = cv2.imread(frame_path, 0)
-        image = frame[frame_h-image_size+1:frame_h+1, 0:image_size]
+        image = frame[frame_h-image_size:frame_h, 0:image_size]
         image = torch.Tensor(image) # [h,w]
         image = torch.unsqueeze(image, 0) # 扩展到channel维度[c,h,w]
         image = torch.unsqueeze(image, 0) # 扩展到frame维度[f,c,h,w]
+        image = torch.unsqueeze(image, 0) # 扩展到batch维度[n,f,c,h,w]
         if frames is None:
             frames = image
         else:
-            frames = torch.cat((frames, image), 0)
+            frames = torch.cat((frames, image), 1)
+    if cuda:
+        frames = frames.cuda()
     # load segmentation 
     seg_ind = index + image_num_in_frame - 1
     seg_name = str(seg_ind) + '.png'
     seg_path = os.path.join(segs_path, seg_name)
     seg = cv2.imread(seg_path, 0)
     label_num = np.amax(seg) # 语义标注中前景的标注数字
-    seg = seg[frame_h-image_size+1:frame_h+1, 0:image_size] / label_num # 得到前景为1, 背景为0的GroundTruth
+    seg = seg[frame_h-image_size:frame_h, 0:image_size] / label_num # 得到前景为1, 背景为0的GroundTruth
     seg = torch.Tensor(seg) # [h,w]
+    seg = torch.unsqueeze(seg, 0) # 扩展到batch维度[n,h,w]
+    if cuda:
+        seg = seg.cuda()
     # predict and evaluation
     logits = model(frames)
     score = cal_score(logits, seg)
@@ -274,22 +305,28 @@ def mask_one(index, threshold=0.5, frames_path='./dataset/frames/', segs_path='.
         frame_name = str(frame_ind) + '.png'
         frame_path = os.path.join(frames_path, frame_name)
         frame = cv2.imread(frame_path, 0)
-        image = frame[frame_h-image_size+1:frame_h+1, frame_w-image_size+1:frame_w+1]
+        image = frame[frame_h-image_size:frame_h, frame_w-image_size:frame_w]
         image = torch.Tensor(image) # [h,w]
         image = torch.unsqueeze(image, 0) # 扩展到channel维度[c,h,w]
         image = torch.unsqueeze(image, 0) # 扩展到frame维度[f,c,h,w]
+        image = torch.unsqueeze(image, 0) # 扩展到batch维度[n,f,c,h,w]
         if frames is None:
             frames = image
         else:
-            frames = torch.cat((frames, image), 0)
+            frames = torch.cat((frames, image), 1)
+    if cuda:
+        frames = frames.cuda()
     # load segmentation 
     seg_ind = index + image_num_in_frame - 1
     seg_name = str(seg_ind) + '.png'
     seg_path = os.path.join(segs_path, seg_name)
     seg = cv2.imread(seg_path, 0)
     label_num = np.amax(seg) # 语义标注中前景的标注数字
-    seg = seg[frame_h-image_size+1:frame_h+1, frame_w-image_size+1:frame_w+1] / label_num # 得到前景为1, 背景为0的GroundTruth
+    seg = seg[frame_h-image_size:frame_h, frame_w-image_size:frame_w] / label_num # 得到前景为1, 背景为0的GroundTruth
     seg = torch.Tensor(seg) # [h,w]
+    seg = torch.unsqueeze(seg, 0) # 扩展到batch维度[n,h,w]
+    if cuda:
+        seg = seg.cuda()
     # predict and evaluation
     logits = model(frames)
     score = cal_score(logits, seg)
@@ -303,13 +340,17 @@ def mask_one(index, threshold=0.5, frames_path='./dataset/frames/', segs_path='.
     '''
     合并4个区域的mask
     '''
+    mask1 = np.squeeze(mask1) # [1,1,512,512] -> [512,512]
+    mask2 = np.squeeze(mask2) # [1,1,512,512] -> [512,512]
+    mask3 = np.squeeze(mask3) # [1,1,512,512] -> [512,512]
+    mask4 = np.squeeze(mask4) # [1,1,512,512] -> [512,512]
     mask = np.zeros((frame_h, frame_w))
     mask[0:image_size, 0:image_size] += mask1
-    mask[0:image_size, frame_w-image_size+1:frame_w+1] += mask2
-    mask[frame_h-image_size+1:frame_h+1, 0:image_size] += mask3
-    mask[frame_h-image_size+1:frame_h+1, frame_w-image_size+1:frame_w+1] += mask4 
+    mask[0:image_size, frame_w-image_size:frame_w] += mask2
+    mask[frame_h-image_size:frame_h, 0:image_size] += mask3
+    mask[frame_h-image_size:frame_h, frame_w-image_size:frame_w] += mask4 
 
-    mask[frame_h-image_size+1:image_size, frame_w-image_size+1:image_size] /= 4
+    mask[frame_h-image_size:image_size, frame_w-image_size:image_size] /= 4
     # 重复区域的像素点采用投票的形式决定其为前景还是背景
     # 2, 3, 4票标记为前景(1)
     # 0, 1票标记为背景(0)
@@ -363,6 +404,8 @@ def mask_one(index, threshold=0.5, frames_path='./dataset/frames/', segs_path='.
 
 
 if __name__ == '__main__':
-    eval(param_path='./param/model_epoch20.pkl', threshold=0.5)
+    # with torch.no_grad(): # 有效预防测试时现存溢出的问题
+    #     eval(param_path='./param/model_epoch10.pkl', threshold=0.5)
 
-    mask_one(1, threshold=0.5, frames_path='./dataset/frames/', seg_path='./dataset/segmentation/')
+    with torch.no_grad(): # 有效预防测试时现存溢出的问题
+        mask_one(142, threshold=0.6, param_path='./param/model_epoch10.pkl', frames_path='./dataset/frames/', segs_path='./dataset/segmentation/')
